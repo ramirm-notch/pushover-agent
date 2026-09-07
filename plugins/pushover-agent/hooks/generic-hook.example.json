@@ -1,0 +1,6 @@
+{
+  "event": "completed",
+  "host": "my-agent",
+  "message": "The agent finished its task.",
+  "conversation_url": "https://example.com/conversations/123"
+}

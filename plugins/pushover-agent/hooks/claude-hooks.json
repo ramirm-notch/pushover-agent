@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "timeout": 15,
+            "async": true,
+            "statusMessage": "Sending Pushover notification..."
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "timeout": 15,
+            "async": true,
+            "statusMessage": "Sending Pushover notification..."
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "timeout": 15,
+            "async": true,
+            "statusMessage": "Sending Pushover notification..."
+          }
+        ]
+      }
+    ]
+  }
+}

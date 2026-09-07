@@ -1,0 +1,19 @@
+{
+  "name": "pushover-agent",
+  "version": "0.1.0",
+  "description": "Send Pushover notifications when an agent finishes or needs input.",
+  "author": {
+    "name": "PluginPushover contributors"
+  },
+  "license": "MIT",
+  "keywords": ["pushover", "notifications", "hooks", "mobile", "agents"],
+  "interface": {
+    "displayName": "Pushover Agent",
+    "shortDescription": "Mobile alerts when an agent stops or needs input.",
+    "longDescription": "Sends a concise Pushover alert after a completed agent turn and when an approval or other user input is required. Notifications include a tappable conversation link when the host or environment provides one.",
+    "developerName": "PluginPushover contributors",
+    "category": "Productivity",
+    "capabilities": ["Lifecycle hooks", "Notifications"],
+    "defaultPrompt": ["Test my Pushover agent notification setup."]
+  }
+}

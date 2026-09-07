@@ -1,0 +1,9 @@
+{
+  "name": "pushover-agent",
+  "version": "0.1.0",
+  "description": "Send Pushover notifications when an agent finishes or needs input.",
+  "author": {
+    "name": "PluginPushover contributors"
+  },
+  "hooks": "./hooks/claude-hooks.json"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "pushover-agent",
+  "description": "Portable Pushover lifecycle notifications for coding agents.",
+  "owner": {
+    "name": "PluginPushover contributors"
+  },
+  "plugins": [
+    {
+      "name": "pushover-agent",
+      "source": "./",
+      "description": "Pushover alerts for completed turns and input requests."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
+            "timeout": 15,
+            "async": true,
+            "statusMessage": "Sending Pushover notification..."
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
+            "timeout": 15,
+            "async": true,
+            "statusMessage": "Sending Pushover notification..."
+          }
+        ]
+      }
+    ]
+  }
+}
