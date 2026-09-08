@@ -29,11 +29,11 @@ function runScript(args, input, env, command) {
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(`notifier exited ${code}: ${stderr}`));
     });
-    child.stdin.end(input || "");
+    if (input !== null) child.stdin.end(input || "");
   });
 }
 
-async function capture(payload, extraEnv = {}, statusCode = 200) {
+async function capture(payload, extraEnv = {}, statusCode = 200, args = []) {
   let received;
   const server = http.createServer((request, response) => {
     let body = "";
@@ -51,7 +51,7 @@ async function capture(payload, extraEnv = {}, statusCode = 200) {
   });
   const { port } = server.address();
   try {
-    const result = await runScript([], JSON.stringify(payload), {
+    const result = await runScript(args, payload === null ? null : JSON.stringify(payload), {
       PUSHOVER_API_TOKEN: "test-token",
       PUSHOVER_USER_KEY: "test-user",
       PUSHOVER_API_URL: `http://127.0.0.1:${port}/1/messages.json`,
@@ -187,4 +187,99 @@ test("declared host hooks send input alerts with the correct host and conversati
       }
     }
   }
+});
+
+test("explicit events win over message guesses and incidental hook metadata", async () => {
+  for (const event of ["completed", "input", "stopped"]) {
+    const { stdout } = await runScript([], JSON.stringify({
+      event,
+      hook_event_name: "Stop",
+      notification_type: "permission_prompt",
+      message: 'Updated the documentation for "Should I retry".',
+    }), { PUSHOVER_DRY_RUN: "1" });
+    assert.equal(JSON.parse(stdout).state, event === "completed" ? "complete" : event);
+  }
+  const { stdout } = await runScript(["--event", "completed"], JSON.stringify({
+    event: "input", message: "Which deployment should I use?",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  assert.equal(JSON.parse(stdout).state, "complete");
+  const { stdout: inferred } = await runScript([], 'Which deployment should I use?', { PUSHOVER_DRY_RUN: "1" });
+  assert.equal(JSON.parse(inferred).state, "input");
+});
+
+test("help and configuration checks neither read stdin nor contact Pushover", async () => {
+  for (const args of [["--help"], ["-h"], ["--check"]]) {
+    const { form, stdout, stderr } = await capture(null, {
+      PUSHOVER_DRY_RUN: "1",
+      PUSHOVER_CONVERSATION_URL_TEMPLATE: "https://agents.example/s/{session_id}",
+    }, 200, args);
+    assert.equal(form, undefined);
+    assert.equal(stderr, "");
+    assert.match(stdout, args[0] === "--check" ? /Local configuration checks passed/ : /Usage:/);
+    assert.doesNotMatch(stdout, /test-token|test-user|https:\/\/agents\.example/);
+  }
+});
+
+test("bad CLI arguments fail without sending or echoing their values", async () => {
+  for (const args of [
+    ["--unknown=private-sentinel"], ["--message"], ["--event", "--host", "example"],
+    ["--payload", "private-sentinel"], ["--payload", "[]"],
+  ]) {
+    await assert.rejects(runScript(args, null, { PUSHOVER_DRY_RUN: "1" }), (error) => {
+      assert.match(error.message, /exited 2:.*--help/);
+      assert.doesNotMatch(error.message, /private-sentinel/);
+      return true;
+    });
+  }
+});
+
+test("configuration checks diagnose missing credentials and invalid settings privately", async () => {
+  await assert.rejects(runScript(["--check"], null, {}), /exited 1:.*PUSHOVER_API_TOKEN/);
+  for (const setting of [
+    { PUSHOVER_API_URL: "private-sentinel" },
+    { PUSHOVER_CONVERSATION_URL: "https://private-sentinel@agents.example/" },
+    { PUSHOVER_CONVERSATION_URL_TEMPLATE: "https://agents.example/{private-sentinel}" },
+    { PUSHOVER_PRIORITY: "private-sentinel" },
+    { PUSHOVER_PRIORITY: "2" },
+  ]) {
+    await assert.rejects(runScript(["--check"], null, {
+      PUSHOVER_API_TOKEN: "test-token", PUSHOVER_USER_KEY: "test-user", ...setting,
+    }), (error) => {
+      assert.match(error.message, /exited 1:/);
+      assert.doesNotMatch(error.message, /private-sentinel|test-token|test-user/);
+      return true;
+    });
+  }
+});
+
+test("invalid conversation links are omitted while the alert is still delivered", async () => {
+  for (const url of [
+    "https://agents.example/" + "a".repeat(512),
+    "private-sentinel",
+    "javascript:private-sentinel",
+    "https://private-sentinel@agents.example/",
+  ]) {
+    const { form, stderr } = await capture({ event: "input", message: "Select a target.", conversation_url: url });
+    assert.equal(form.get("url"), null);
+    assert.equal(form.get("url_title"), null);
+    assert.equal(form.get("message"), "Select a target.");
+    assert.match(stderr, /Conversation link omitted/);
+    assert.doesNotMatch(stderr, /private-sentinel/);
+  }
+  for (const template of ["https://agents.example/{session_id}", "https://agents.example/{unknown}"]) {
+    const { form, stderr } = await capture({ event: "input", host: "my-agent" }, {
+      PUSHOVER_CONVERSATION_URL_TEMPLATE: template,
+    });
+    assert.equal(form.get("url"), null);
+    assert.match(stderr, /Conversation link omitted/);
+  }
+});
+
+test("a conversation URL at the size limit is preserved exactly", async () => {
+  const prefix = "https://agents.example/";
+  const url = prefix + "a".repeat(512 - prefix.length);
+  const { form } = await capture({ event: "completed", message: "Long result. ".repeat(120), conversation_url: url });
+  assert.equal(form.get("url"), url);
+  assert.ok(form.get("message").endsWith(url));
+  assert.ok(form.get("message").length <= 1024);
 });

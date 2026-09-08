@@ -9,6 +9,7 @@ import process from "node:process";
 const MAX_TITLE = 250;
 const MAX_MESSAGE = 1024;
 const MAX_URL = 512;
+const DEFAULT_API_URL = "https://api.pushover.net/1/messages.json";
 
 function first(...values) {
   return values.find((value) => typeof value === "string" && value.trim())?.trim() || "";
@@ -16,12 +17,25 @@ function first(...values) {
 
 function parseArgs(argv) {
   const result = {};
+  const invalid = Object.assign(new Error("Invalid command-line arguments. Use --help for usage."), { exitCode: 2 });
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index];
-    if (!item.startsWith("--")) continue;
+    if (item === "--help" || item === "-h") { result.help = true; continue; }
+    if (item === "--check") { result.check = true; continue; }
+    if (!item.startsWith("--")) throw invalid;
     const [rawKey, inlineValue] = item.slice(2).split(/=(.*)/s, 2);
-    const key = rawKey.replaceAll("-", "_");
-    result[key] = inlineValue ?? argv[++index] ?? "";
+    if (!["event", "host", "message", "url", "payload"].includes(rawKey)) throw invalid;
+    const value = inlineValue ?? argv[++index];
+    if (value === undefined || (inlineValue === undefined && (value.startsWith("--") || value === "-h"))) throw invalid;
+    result[rawKey] = value;
+  }
+  if (result.payload !== undefined) {
+    try {
+      result.payload = JSON.parse(result.payload);
+      if (!result.payload || typeof result.payload !== "object" || Array.isArray(result.payload)) throw invalid;
+    } catch {
+      throw invalid;
+    }
   }
   return result;
 }
@@ -98,7 +112,7 @@ function detectHost(payload, args) {
 }
 
 function detectEvent(payload, args) {
-  return first(args.event, payload.hook_event_name, payload.hookEventName, payload.event, payload.type, process.env.AGENT_EVENT, "completed");
+  return first(args.event, payload.event, payload.hook_event_name, payload.hookEventName, payload.type, process.env.AGENT_EVENT, "Stop");
 }
 
 function looksLikeQuestion(text) {
@@ -111,10 +125,11 @@ function looksLikeQuestion(text) {
 function classify(event, payload, message) {
   const normalized = event.toLowerCase();
   const notification = String(payload.notification_type || "").toLowerCase();
-  if (normalized === "input") return "input";
+  if (normalized === "completed" || normalized === "complete") return "complete";
+  if (normalized === "input" || normalized === "stopped") return normalized;
   if (normalized.includes("permission") || notification.includes("permission")) return "input";
   if (normalized === "notification" || notification.includes("idle")) return "input";
-  if (normalized.includes("sessionend") || normalized === "stopped" || normalized === "interrupt") return "stopped";
+  if (normalized.includes("sessionend") || normalized === "interrupt") return "stopped";
   if (looksLikeQuestion(message)) return "input";
   return "complete";
 }
@@ -128,7 +143,25 @@ function identifiers(payload) {
 }
 
 function applyTemplate(template, values) {
-  return template.replace(/\{(session_id|thread_id|turn_id|host)\}/g, (_match, key) => encodeURIComponent(values[key] || ""));
+  return template.replace(/\{([^{}]+)\}/g, (_match, key) => {
+    if (!Object.hasOwn(values, key)) throw new Error("Conversation URL template has an unsupported placeholder.");
+    if (!values[key]) throw new Error(`Conversation URL template requires ${key}.`);
+    return encodeURIComponent(values[key]);
+  });
+}
+
+function validateConversationUrl(value) {
+  if (!value) return "";
+  if (value.length > MAX_URL) throw new Error("Conversation URL exceeds 512 characters.");
+  try {
+    const url = new URL(value);
+    if (!/^[a-z][a-z\d+.-]*:\/\//i.test(value) || !url.hostname
+      || ["javascript:", "data:", "file:", "vbscript:"].includes(url.protocol)
+      || url.username || url.password || /[\s{}\\]/u.test(value)) throw new Error();
+  } catch {
+    throw new Error("Conversation URL must be an absolute web or app link without credentials, whitespace, or placeholders.");
+  }
+  return value;
 }
 
 function conversationUrl(payload, args, host) {
@@ -143,13 +176,13 @@ function conversationUrl(payload, args, host) {
     process.env.PUSHOVER_CONVERSATION_URL,
     process.env.AGENT_CONVERSATION_URL,
   );
-  if (explicit) return truncate(explicit, MAX_URL);
+  if (explicit) return validateConversationUrl(explicit);
 
   const template = first(process.env.PUSHOVER_CONVERSATION_URL_TEMPLATE, process.env.AGENT_CONVERSATION_URL_TEMPLATE);
-  if (template) return truncate(applyTemplate(template, { ...ids, host }), MAX_URL);
+  if (template) return validateConversationUrl(applyTemplate(template, { ...ids, host }));
 
   const codexId = host === "Codex" ? ids.thread_id || ids.session_id : "";
-  return codexId ? `codex://threads/${encodeURIComponent(codexId)}` : "";
+  return validateConversationUrl(codexId ? `codex://threads/${encodeURIComponent(codexId)}` : "");
 }
 
 function messageFromPayload(payload, args) {
@@ -178,10 +211,15 @@ function notification(payload, args) {
   const prefix = first(process.env.PUSHOVER_TITLE_PREFIX);
   const label = state === "input" ? "needs input" : state === "stopped" ? "stopped" : "finished";
   const title = truncate([prefix, `${host} ${label}`, `— ${project}`].filter(Boolean).join(" "), MAX_TITLE);
-  const url = conversationUrl(payload, args, host);
+  let url = "";
+  try {
+    url = conversationUrl(payload, args, host);
+  } catch (error) {
+    process.stderr.write(`[pushover-agent] Conversation link omitted: ${error.message}\n`);
+  }
   const fallback = state === "input" ? "The agent is waiting for you." : state === "stopped" ? "The agent stopped." : "The agent completed its turn.";
-  const excerpt = truncate(message || fallback, url ? 780 : MAX_MESSAGE);
-  const body = truncate(url ? `${excerpt}\n\nOpen conversation: ${url}` : excerpt, MAX_MESSAGE);
+  const suffix = url ? `\n\nOpen conversation: ${url}` : "";
+  const body = truncate(message || fallback, MAX_MESSAGE - suffix.length) + suffix;
   return { title, message: body, url, state, host, event };
 }
 
@@ -216,9 +254,60 @@ function requestPushover(endpoint, fields) {
   });
 }
 
+function credentials() {
+  const token = first(process.env.PUSHOVER_API_TOKEN, process.env.PUSHOVER_TOKEN);
+  const user = first(process.env.PUSHOVER_USER_KEY, process.env.PUSHOVER_USER);
+  if (!token || !user) throw new Error("Set PUSHOVER_API_TOKEN (or PUSHOVER_TOKEN) and PUSHOVER_USER_KEY (or PUSHOVER_USER)");
+  return { token, user };
+}
+
+function checkConfiguration(args) {
+  credentials();
+  try {
+    const endpoint = new URL(first(process.env.PUSHOVER_API_URL, DEFAULT_API_URL));
+    if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error();
+  } catch {
+    throw new Error("PUSHOVER_API_URL must be an HTTP(S) URL without embedded credentials.");
+  }
+  const priority = first(process.env.PUSHOVER_PRIORITY);
+  if (priority && !["-2", "-1", "0", "1"].includes(priority)) {
+    throw new Error("PUSHOVER_PRIORITY must be -2, -1, 0, or 1; emergency priority is not supported.");
+  }
+  // Check template syntax with sample IDs; real identifiers are validated when the hook runs.
+  const payload = { session_id: "check", thread_id: "check", turn_id: "check", ...args.payload };
+  conversationUrl(payload, args, detectHost(payload, args));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const payload = { ...(await readInput()), ...(args.payload ? JSON.parse(args.payload) : {}) };
+  if (args.help) {
+    process.stdout.write(`Usage: node plugins/pushover-agent/scripts/pushover-notify.mjs [options]
+
+  --help, -h          Show this help without reading stdin or sending a notification.
+  --check            Check local configuration without reading stdin or making network requests.
+  --event VALUE      completed, input, stopped, or a host lifecycle event (otherwise inferred).
+  --host VALUE       Agent name.
+  --message VALUE    Notification text.
+  --url VALUE        Absolute conversation URL, up to 512 characters.
+  --payload JSON     JSON object overriding stdin fields; metadata for templates and hooks.
+
+Normal mode reads lifecycle JSON or plain text from stdin.
+Credentials: PUSHOVER_API_TOKEN and PUSHOVER_USER_KEY (aliases PUSHOVER_TOKEN and PUSHOVER_USER).
+PUSHOVER_DRY_RUN=1 previews an alert; PUSHOVER_FAIL_HARD=1 makes delivery failures exit 1.
+CLI errors exit 2; failed --check exits 1. See README.md for all settings.
+`);
+    return;
+  }
+  if (args.check) {
+    try {
+      checkConfiguration(args);
+    } catch (error) {
+      throw Object.assign(error, { exitCode: 1 });
+    }
+    process.stdout.write("Local configuration checks passed: credential presence, API endpoint, priority, and link syntax.\nNo network request was made; credential validity, runtime identifiers, and mobile delivery are unverified.\n");
+    return;
+  }
+  const payload = { ...(await readInput()), ...args.payload };
   const notice = notification(payload, args);
   if (notice.event.toLowerCase().includes("subagent") && !isTruthy(process.env.PUSHOVER_NOTIFY_SUBAGENTS)) return;
 
@@ -227,9 +316,7 @@ async function main() {
     return;
   }
 
-  const token = first(process.env.PUSHOVER_API_TOKEN, process.env.PUSHOVER_TOKEN);
-  const user = first(process.env.PUSHOVER_USER_KEY, process.env.PUSHOVER_USER);
-  if (!token || !user) throw new Error("Set PUSHOVER_API_TOKEN (or PUSHOVER_TOKEN) and PUSHOVER_USER_KEY (or PUSHOVER_USER)");
+  const { token, user } = credentials();
 
   const fields = { token, user, title: notice.title, message: notice.message };
   if (notice.url) {
@@ -239,10 +326,10 @@ async function main() {
   for (const [field, envName] of [["device", "PUSHOVER_DEVICE"], ["sound", "PUSHOVER_SOUND"], ["priority", "PUSHOVER_PRIORITY"]]) {
     if (first(process.env[envName])) fields[field] = first(process.env[envName]);
   }
-  await requestPushover(first(process.env.PUSHOVER_API_URL, "https://api.pushover.net/1/messages.json"), fields);
+  await requestPushover(first(process.env.PUSHOVER_API_URL, DEFAULT_API_URL), fields);
 }
 
 main().catch((error) => {
   process.stderr.write(`[pushover-agent] ${error.message}\n`);
-  process.exitCode = isTruthy(process.env.PUSHOVER_FAIL_HARD) ? 1 : 0;
+  process.exitCode = error.exitCode ?? (isTruthy(process.env.PUSHOVER_FAIL_HARD) ? 1 : 0);
 });

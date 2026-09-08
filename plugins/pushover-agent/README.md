@@ -21,6 +21,16 @@ export PUSHOVER_USER_KEY="your-user-or-group-key"
 
 The shorter aliases `PUSHOVER_TOKEN` and `PUSHOVER_USER` are also accepted. Credentials are read only at runtime and are never stored in the plugin.
 
+Check the local setup without sending an alert:
+
+```sh
+node plugins/pushover-agent/scripts/pushover-notify.mjs --check
+```
+
+This checks credential presence, API endpoint syntax, supported priority, and the active conversation URL or template. It never prints configuration values, reads stdin or transcripts, or makes network requests. Templates are checked with sample identifiers; actual identifiers are checked when a hook runs. Success does not prove that credentials are accepted, a host is installed, or a phone receives notifications. Missing or invalid configuration exits with code 1, independently of `PUSHOVER_FAIL_HARD`.
+
+Use `node plugins/pushover-agent/scripts/pushover-notify.mjs --help` for the supported flags. Unknown flags, missing flag values, and invalid `--payload` JSON objects exit with code 2 without sending an alert.
+
 ## Conversation links
 
 If a hook provides `conversation_url`, `share_url`, or `web_url`, the plugin uses it automatically. You can also set a fixed URL:
@@ -36,6 +46,8 @@ export PUSHOVER_CONVERSATION_URL_TEMPLATE='https://agents.example/conversations/
 ```
 
 Supported placeholders are `{session_id}`, `{thread_id}`, `{turn_id}`, and `{host}`. Values are URL-encoded. Local Codex turns fall back to `codex://threads/{thread_id}`; this opens the installed Codex app but is not a public web share link. A local agent cannot create an internet-accessible conversation URL by itself, so use an HTTPS template or a hook-provided share URL when access from anywhere is required.
+
+Links must be absolute web or application URLs in `scheme://host/...` form, with no embedded username/password, whitespace, or unresolved placeholders. Executable schemes and local-file links are rejected. Links exceeding [Pushover's 512-character limit](https://pushover.net/api#limits) are omitted rather than truncated. A template with an unknown placeholder or a missing required identifier is also omitted. These cases produce a warning without printing the URL and still deliver the message without a conversation action. Invalid supplied links do not fall back to a different conversation.
 
 ## Install in Codex
 
@@ -69,6 +81,8 @@ node /absolute/path/to/PluginPushover/plugins/pushover-agent/scripts/pushover-no
 
 The generic input fields are `event`, `host`, `message`, `conversation_url`, `session_id`, `thread_id`, `turn_id`, and `cwd`. Set `event` to `completed`, `input`, or `stopped`; `input` explicitly requests an alert even when the message is not phrased as a question. Supply `host` so a launching agent's environment does not determine the sender. The `--event`, `--host`, `--message`, and `--url` flags override their JSON equivalents:
 
+Explicit `completed`, `input`, and `stopped` events take precedence over message wording and notification metadata. Event selection uses `--event`, then JSON `event`, then host lifecycle fields. Question detection still handles `Stop` events and messages with no event. `--payload '{"session_id":"example"}'` supplies additional JSON fields and overrides stdin fields.
+
 ```sh
 node plugins/pushover-agent/scripts/pushover-notify.mjs \
   --event input \
@@ -85,7 +99,7 @@ This makes the notification engine portable, but each agent must expose a lifecy
 | --- | --- |
 | `PUSHOVER_DEVICE` | Limit delivery to one Pushover device. |
 | `PUSHOVER_SOUND` | Select a Pushover sound. |
-| `PUSHOVER_PRIORITY` | Set Pushover priority. |
+| `PUSHOVER_PRIORITY` | Use `-2`, `-1`, `0`, or `1`. Emergency priority `2` requires retry/expiry settings that this plugin does not support. |
 | `PUSHOVER_TITLE_PREFIX` | Prefix every notification title. |
 | `PUSHOVER_NOTIFY_SUBAGENTS=1` | Enable notifications for subagent events passed by generic hosts. |
 | `PUSHOVER_DRY_RUN=1` | Print the normalized notification without sending it. |
