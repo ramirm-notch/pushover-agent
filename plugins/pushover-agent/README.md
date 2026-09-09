@@ -21,6 +21,17 @@ export PUSHOVER_USER_KEY="your-user-or-group-key"
 
 The shorter aliases `PUSHOVER_TOKEN` and `PUSHOVER_USER` are also accepted. Credentials are read only at runtime and are never stored in the plugin.
 
+To use a separate Pushover application per host, export `PUSHOVER_API_TOKEN_CC` (Claude Code) and/or `PUSHOVER_API_TOKEN_CODEX` (Codex). The bundled hooks prefer these and fall back to `PUSHOVER_API_TOKEN`. The user key is shared.
+
+The Claude Code desktop app does not load your shell profile, so exports in `~/.zshrc` do not reach its hooks. Add the same values to the `env` block of `~/.claude/settings.json` as well:
+
+```json
+"env": {
+  "PUSHOVER_API_TOKEN_CC": "your-claude-application-token",
+  "PUSHOVER_USER_KEY": "your-user-or-group-key"
+}
+```
+
 Check the local setup without sending an alert:
 
 ```sh
