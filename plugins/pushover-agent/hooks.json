@@ -7,7 +7,6 @@
             "type": "command",
             "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CODEX:-$PUSHOVER_API_TOKEN}\" node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
             "timeout": 15,
-            "async": true,
             "statusMessage": "Sending Pushover notification..."
           }
         ]
@@ -20,7 +19,6 @@
             "type": "command",
             "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CODEX:-$PUSHOVER_API_TOKEN}\" node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
             "timeout": 15,
-            "async": true,
             "statusMessage": "Sending Pushover notification..."
           }
         ]

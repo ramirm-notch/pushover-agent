@@ -171,6 +171,10 @@ test("declared host hooks send input alerts with the correct host and conversati
       const hooks = config.hooks[event].flatMap((group) => group.hooks);
       assert.ok(hooks.length, `${host} ${event} must have a hook`);
       for (const hook of hooks) {
+        assert.ok(
+          !("async" in hook),
+          `${host} ${event} must not declare async: the host kills the hook process before delivery completes`,
+        );
         const { stdout } = await runScript([], JSON.stringify({
           hook_event_name: event,
           session_id: "session-123",
