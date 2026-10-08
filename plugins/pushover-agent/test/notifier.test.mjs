@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +32,33 @@ function runScript(args, input, env, command) {
     });
     if (input !== null) child.stdin.end(input || "");
   });
+}
+
+function cursorTranscript(text) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pushover-agent-"));
+  const file = path.join(directory, "transcript.jsonl");
+  fs.writeFileSync(file, [
+    { role: "user", message: { content: [{ type: "text", text: "Deploy it." }] } },
+    { role: "assistant", message: { content: [{ type: "text", text }] } },
+    { role: "assistant", message: { content: [{ type: "tool_use", name: "Shell", input: {} }] } },
+    { type: "turn_ended", status: "success" },
+  ].map((record) => JSON.stringify(record)).join("\n"));
+  return file;
+}
+
+function cursorStop(overrides = {}) {
+  return {
+    conversation_id: "conversation-123",
+    generation_id: "generation-123",
+    session_id: "conversation-123",
+    hook_event_name: "stop",
+    status: "completed",
+    loop_count: 0,
+    cursor_version: "2.0.0",
+    workspace_roots: ["/work/my-project"],
+    transcript_path: cursorTranscript("Which deployment should I use?"),
+    ...overrides,
+  };
 }
 
 async function capture(payload, extraEnv = {}, statusCode = 200, args = []) {
@@ -161,36 +189,110 @@ test("marketplaces resolve to the packaged plugin", () => {
 });
 
 test("declared host hooks send input alerts with the correct host and conversation", async () => {
-  const claude = JSON.parse(fs.readFileSync(path.join(pluginRoot, ".claude-plugin/plugin.json"), "utf8"));
-  for (const [host, hooksPath, events] of [
-    ["Codex", "hooks.json", ["Stop", "PermissionRequest"]],
-    ["Claude Code", claude.hooks, ["Stop", "Notification", "PermissionRequest"]],
+  for (const [host, manifestPath, events] of [
+    ["Codex", ".codex-plugin/plugin.json", ["Stop", "PermissionRequest"]],
+    ["Claude Code", ".claude-plugin/plugin.json", ["Stop", "Notification", "PermissionRequest"]],
+    ["Cursor", ".cursor-plugin/plugin.json", ["stop"]],
   ]) {
-    const config = JSON.parse(fs.readFileSync(path.join(pluginRoot, hooksPath), "utf8"));
+    const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifestPath), "utf8"));
+    assert.equal(typeof manifest.hooks, "string", `${manifestPath} must declare its hooks file`);
+    const config = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifest.hooks), "utf8"));
     for (const event of events) {
-      const hooks = config.hooks[event].flatMap((group) => group.hooks);
+      const hooks = (config.hooks[event] || []).flatMap((group) => group.hooks ?? [group]);
       assert.ok(hooks.length, `${host} ${event} must have a hook`);
       for (const hook of hooks) {
         assert.ok(
           !("async" in hook),
           `${host} ${event} must not declare async: the host kills the hook process before delivery completes`,
         );
-        const { stdout } = await runScript([], JSON.stringify({
+        const payload = host === "Cursor" ? cursorStop() : {
           hook_event_name: event,
           session_id: "session-123",
           last_assistant_message: event === "Stop" ? "Which deployment should I use?" : "Review this network request.",
-        }), {
+        };
+        // Cursor exports both plugin-root variables, so it must not be mistaken for Claude Code.
+        const { stdout } = await runScript([], JSON.stringify(payload), {
           PUSHOVER_DRY_RUN: "1",
           PLUGIN_ROOT: pluginRoot,
           CLAUDE_PLUGIN_ROOT: pluginRoot,
+          ...(host === "Cursor" && { CURSOR_PLUGIN_ROOT: pluginRoot, CURSOR_VERSION: "2.0.0" }),
         }, hook.command);
         const notice = JSON.parse(stdout);
         assert.equal(notice.host, host, `${host} ${event} host`);
         assert.equal(notice.state, "input", `${host} ${event} state`);
         assert.equal(notice.url, host === "Codex" ? "codex://threads/session-123" : "");
+        if (host === "Cursor") {
+          assert.equal(notice.title, "Cursor needs input — my-project");
+          assert.match(notice.message, /^Which deployment should I use\?/);
+        }
       }
     }
   }
+});
+
+test("hook files avoid the hosts' default hooks/hooks.json path", () => {
+  // Claude Code and Codex load hooks/hooks.json in addition to declared files, and Cursor would read it
+  // for any manifest without a hooks field, so a file there would run with the wrong host format.
+  assert.equal(fs.existsSync(path.join(pluginRoot, "hooks/hooks.json")), false);
+});
+
+test("plugin manifests share one name and version so installed caches refresh together", () => {
+  const read = (file) => JSON.parse(fs.readFileSync(path.join(pluginRoot, file), "utf8"));
+  const { version } = read("package.json");
+  for (const file of [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json"]) {
+    assert.equal(read(file).name, "pushover-agent", file);
+    assert.equal(read(file).version, version, file);
+  }
+});
+
+test("Cursor stop payloads use the transcript, workspace, and turn status without an explicit host", async () => {
+  const { stdout } = await runScript([], JSON.stringify(cursorStop()), {
+    PUSHOVER_DRY_RUN: "1", CLAUDE_PLUGIN_ROOT: pluginRoot,
+  });
+  const notice = JSON.parse(stdout);
+  assert.equal(notice.title, "Cursor needs input — my-project");
+  for (const status of ["aborted", "error"]) {
+    const { stdout: stopped } = await runScript(["--host", "Cursor"], JSON.stringify(cursorStop({
+      status, transcript_path: cursorTranscript("Ran the migration."),
+    })), { PUSHOVER_DRY_RUN: "1" });
+    assert.equal(JSON.parse(stopped).state, "stopped", status);
+  }
+});
+
+test("Codex notify passes its event as one JSON argument without stdin", async () => {
+  const { stdout } = await runScript([JSON.stringify({
+    type: "agent-turn-complete",
+    "thread-id": "thread-123",
+    "turn-id": "turn-123",
+    cwd: "/work/my-project",
+    "input-messages": ["Ship it."],
+    "last-assistant-message": "Implemented and verified the change.",
+  })], null, { PUSHOVER_DRY_RUN: "1" });
+  const notice = JSON.parse(stdout);
+  assert.equal(notice.title, "Codex finished — my-project");
+  assert.equal(notice.url, "codex://threads/thread-123");
+  assert.match(notice.message, /^Implemented and verified the change\./);
+});
+
+test("per-host application tokens override the shared token", async () => {
+  for (const [host, env, token] of [
+    ["Cursor", { PUSHOVER_API_TOKEN_CURSOR: "cursor-token" }, "cursor-token"],
+    ["Codex", { PUSHOVER_API_TOKEN_CODEX: "codex-token" }, "codex-token"],
+    ["Claude Code", { PUSHOVER_API_TOKEN_CC: "claude-token" }, "claude-token"],
+    ["my-agent", { PUSHOVER_API_TOKEN_MY_AGENT: "generic-token" }, "generic-token"],
+    ["other-agent", { PUSHOVER_API_TOKEN_CURSOR: "cursor-token" }, "shared-token"],
+  ]) {
+    const { form } = await capture({ event: "completed", host }, { PUSHOVER_API_TOKEN: "shared-token", ...env });
+    assert.equal(form.get("token"), token, host);
+  }
+  const { stdout } = await runScript(["--check", "--host", "Cursor"], null, {
+    PUSHOVER_API_TOKEN_CURSOR: "cursor-token", PUSHOVER_USER_KEY: "test-user",
+  });
+  assert.match(stdout, /Local configuration checks passed/);
+  // Without a host, --check must not borrow another host's token.
+  await assert.rejects(runScript(["--check"], null, {
+    PUSHOVER_API_TOKEN_CODEX: "codex-token", PUSHOVER_USER_KEY: "test-user",
+  }), /exited 1:.*PUSHOVER_API_TOKEN/);
 });
 
 test("explicit events win over message guesses and incidental hook metadata", async () => {
@@ -228,6 +330,7 @@ test("bad CLI arguments fail without sending or echoing their values", async () 
   for (const args of [
     ["--unknown=private-sentinel"], ["--message"], ["--event", "--host", "example"],
     ["--payload", "private-sentinel"], ["--payload", "[]"],
+    ["private-sentinel"], ["{}", '{"private":"sentinel"}'],
   ]) {
     await assert.rejects(runScript(args, null, { PUSHOVER_DRY_RUN: "1" }), (error) => {
       assert.match(error.message, /exited 2:.*--help/);

@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CODEX:-$PUSHOVER_API_TOKEN}\" node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
+            "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
             "timeout": 15,
             "statusMessage": "Sending Pushover notification..."
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CODEX:-$PUSHOVER_API_TOKEN}\" node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
+            "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
             "timeout": 15,
             "statusMessage": "Sending Pushover notification..."
           }

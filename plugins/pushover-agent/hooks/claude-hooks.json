@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CC:-$PUSHOVER_API_TOKEN}\" node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
             "timeout": 15,
             "statusMessage": "Sending Pushover notification..."
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CC:-$PUSHOVER_API_TOKEN}\" node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
             "timeout": 15,
             "statusMessage": "Sending Pushover notification..."
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PUSHOVER_API_TOKEN=\"${PUSHOVER_API_TOKEN_CC:-$PUSHOVER_API_TOKEN}\" node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host \"Claude Code\"",
             "timeout": 15,
             "statusMessage": "Sending Pushover notification..."
           }

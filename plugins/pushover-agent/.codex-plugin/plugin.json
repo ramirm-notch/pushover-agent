@@ -1,12 +1,13 @@
 {
   "name": "pushover-agent",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Send Pushover notifications when an agent finishes or needs input.",
   "author": {
     "name": "PluginPushover contributors"
   },
   "license": "MIT",
   "keywords": ["pushover", "notifications", "hooks", "mobile", "agents"],
+  "hooks": "./hooks.json",
   "interface": {
     "displayName": "Pushover Agent",
     "shortDescription": "Mobile alerts when an agent stops or needs input.",

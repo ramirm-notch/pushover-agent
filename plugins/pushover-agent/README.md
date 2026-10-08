@@ -1,6 +1,6 @@
 # Pushover Agent
 
-Pushover Agent sends a mobile notification whenever an agent completes a turn or pauses for user input. It supports Codex and Claude Code directly and exposes a host-neutral command that any agent with lifecycle hooks can call.
+Pushover Agent sends a mobile notification whenever an agent completes a turn or pauses for user input. It supports Codex, Claude Code, and Cursor directly and exposes a host-neutral command that any agent with lifecycle hooks can call.
 
 The notification contains the agent's last message, the project name, and a conversation URL when available. The same URL is also set as Pushover's **Open conversation** action.
 
@@ -21,9 +21,9 @@ export PUSHOVER_USER_KEY="your-user-or-group-key"
 
 The shorter aliases `PUSHOVER_TOKEN` and `PUSHOVER_USER` are also accepted. Credentials are read only at runtime and are never stored in the plugin.
 
-To use a separate Pushover application per host, export `PUSHOVER_API_TOKEN_CC` (Claude Code) and/or `PUSHOVER_API_TOKEN_CODEX` (Codex). The bundled hooks prefer these and fall back to `PUSHOVER_API_TOKEN`. The user key is shared.
+To use a separate Pushover application per host, export `PUSHOVER_API_TOKEN_CC` (Claude Code), `PUSHOVER_API_TOKEN_CODEX` (Codex), and/or `PUSHOVER_API_TOKEN_CURSOR` (Cursor). For any other host the notifier checks `PUSHOVER_API_TOKEN_<HOST>`, where `<HOST>` is the `--host` name upper-cased with other characters replaced by `_` (`my-agent` → `PUSHOVER_API_TOKEN_MY_AGENT`). A per-host token wins over `PUSHOVER_API_TOKEN`. The user key is shared.
 
-The Claude Code desktop app does not load your shell profile, so exports in `~/.zshrc` do not reach its hooks. Add the same values to the `env` block of `~/.claude/settings.json` as well:
+The Claude Code desktop app does not load your shell profile, so exports in `~/.zshrc` do not reach its hooks. Other desktop apps, including Cursor, may behave the same way; if alerts never arrive, launch the app from a shell that has the variables exported. Add the same values to the `env` block of `~/.claude/settings.json` as well:
 
 ```json
 "env": {
@@ -38,7 +38,7 @@ Check the local setup without sending an alert:
 node plugins/pushover-agent/scripts/pushover-notify.mjs --check
 ```
 
-This checks credential presence, API endpoint syntax, supported priority, and the active conversation URL or template. It never prints configuration values, reads stdin or transcripts, or makes network requests. Templates are checked with sample identifiers; actual identifiers are checked when a hook runs. Success does not prove that credentials are accepted, a host is installed, or a phone receives notifications. Missing or invalid configuration exits with code 1, independently of `PUSHOVER_FAIL_HARD`.
+Add `--host Codex`, `--host Cursor`, or another host name to check that host's token. This checks credential presence, API endpoint syntax, supported priority, and the active conversation URL or template. It never prints configuration values, reads stdin or transcripts, or makes network requests. Templates are checked with sample identifiers; actual identifiers are checked when a hook runs. Success does not prove that credentials are accepted, a host is installed, or a phone receives notifications. Missing or invalid configuration exits with code 1, independently of `PUSHOVER_FAIL_HARD`.
 
 Use `node plugins/pushover-agent/scripts/pushover-notify.mjs --help` for the supported flags. Unknown flags, missing flag values, and invalid `--payload` JSON objects exit with code 2 without sending an alert.
 
@@ -71,6 +71,8 @@ codex plugin add pushover-agent@personal
 
 Open `/hooks`, review and trust the `Stop` and `PermissionRequest` hooks, then start a new task. Restart the Codex desktop app after installation.
 
+Versions before 0.2.0 did not declare their hooks to Codex, so Codex never ran them. To upgrade, run `codex plugin add pushover-agent@personal` again, then trust the hooks in `/hooks`.
+
 ## Install in Claude Code
 
 From the repository root, run these as two separate prompts:
@@ -81,6 +83,23 @@ From the repository root, run these as two separate prompts:
 ```
 
 The `Stop` hook handles both final responses and questions. `PermissionRequest` and permission/idle notifications alert immediately when Claude is waiting for action.
+
+Claude Code caches plugins by version. To upgrade an existing install, run `/plugin marketplace update pushover-agent`, then `/plugin install pushover-agent@pushover-agent` again and start a new session. Cursor runs this copy too (see [Install in Cursor](#install-in-cursor)), and copies older than 0.2.0 label Cursor alerts as Claude Code.
+
+## Install in Cursor
+
+Cursor loads local plugins from `~/.cursor/plugins/local` and rejects symlinks that point outside that folder, so copy the plugin there:
+
+```sh
+mkdir -p ~/.cursor/plugins/local
+cp -R plugins/pushover-agent ~/.cursor/plugins/local/pushover-agent
+```
+
+Restart Cursor. Copy the folder again after updating it.
+
+Cursor can also load plugins installed in Claude Code, and then uses this plugin's Cursor hooks when it does. If Pushover Agent is installed in Claude Code, do not copy it into `~/.cursor/plugins/local` as well, or Cursor sends each alert twice.
+
+Cursor only exposes a `stop` hook. Questions in the final message alert as “needs input”, and cancelled or failed turns alert as “stopped”. Cursor has no hook for permission prompts, so those do not alert.
 
 ## Other agents
 
@@ -100,6 +119,12 @@ node plugins/pushover-agent/scripts/pushover-notify.mjs \
   --host my-agent \
   --message "Select a deployment target." \
   --url "https://example.com/conversation/123"
+```
+
+Codex's `notify` setting is an alternative to the plugin hooks (use only one). It passes the event as a single JSON argument, which the notifier accepts:
+
+```toml
+notify = ["node", "/absolute/path/to/PluginPushover/plugins/pushover-agent/scripts/pushover-notify.mjs"]
 ```
 
 This makes the notification engine portable, but each agent must expose a lifecycle hook. Hosts without completion/input hooks cannot trigger any plugin automatically.

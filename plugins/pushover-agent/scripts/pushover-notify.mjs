@@ -15,6 +15,16 @@ function first(...values) {
   return values.find((value) => typeof value === "string" && value.trim())?.trim() || "";
 }
 
+function parseObject(value, invalid) {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // Reported below without echoing the value.
+  }
+  throw invalid;
+}
+
 function parseArgs(argv) {
   const result = {};
   const invalid = Object.assign(new Error("Invalid command-line arguments. Use --help for usage."), { exitCode: 2 });
@@ -22,21 +32,19 @@ function parseArgs(argv) {
     const item = argv[index];
     if (item === "--help" || item === "-h") { result.help = true; continue; }
     if (item === "--check") { result.check = true; continue; }
-    if (!item.startsWith("--")) throw invalid;
+    if (!item.startsWith("--")) {
+      // Codex's legacy `notify` setting passes the event as a single JSON argument instead of stdin.
+      if (result.notify) throw invalid;
+      result.notify = parseObject(item, invalid);
+      continue;
+    }
     const [rawKey, inlineValue] = item.slice(2).split(/=(.*)/s, 2);
     if (!["event", "host", "message", "url", "payload"].includes(rawKey)) throw invalid;
     const value = inlineValue ?? argv[++index];
     if (value === undefined || (inlineValue === undefined && (value.startsWith("--") || value === "-h"))) throw invalid;
     result[rawKey] = value;
   }
-  if (result.payload !== undefined) {
-    try {
-      result.payload = JSON.parse(result.payload);
-      if (!result.payload || typeof result.payload !== "object" || Array.isArray(result.payload)) throw invalid;
-    } catch {
-      throw invalid;
-    }
-  }
+  if (result.payload !== undefined) result.payload = parseObject(result.payload, invalid);
   return result;
 }
 
@@ -70,8 +78,9 @@ function contentText(content) {
 function assistantTextFromRecord(record) {
   const candidates = [record, record?.payload, record?.message, record?.payload?.message].filter(Boolean);
   for (const candidate of candidates) {
-    if (candidate?.role === "assistant" || (candidate?.type === "message" && candidate?.role === "assistant")) {
-      const text = contentText(candidate.content);
+    if (candidate?.role === "assistant") {
+      // Cursor keeps the role on the record and the content under `message`.
+      const text = contentText(candidate.content ?? candidate.message?.content);
       if (text) return text;
     }
   }
@@ -106,7 +115,11 @@ function lastTranscriptMessage(transcriptPath) {
 function detectHost(payload, args) {
   const namedHost = first(args.host, payload.host, process.env.AGENT_HOST);
   if (namedHost) return namedHost;
-  if (payload.type === "agent-turn-complete" || payload["thread-id"] || payload.thread_id || payload.turn_id || process.env.CODEX_THREAD_ID) return "Codex";
+  if (payload.type === "agent-turn-complete" || payload["thread-id"] || payload.thread_id || payload.turn_id) return "Codex";
+  // Cursor hooks also carry session_id and CLAUDE_PLUGIN_ROOT, so recognize Cursor before Claude Code.
+  if (payload.cursor_version) return "Cursor";
+  if (process.env.CODEX_THREAD_ID) return "Codex";
+  if (process.env.CURSOR_VERSION) return "Cursor";
   if (payload.notification_type || payload.session_id || process.env.CLAUDE_PLUGIN_ROOT) return "Claude Code";
   return "Agent";
 }
@@ -130,6 +143,8 @@ function classify(event, payload, message) {
   if (normalized.includes("permission") || notification.includes("permission")) return "input";
   if (normalized === "notification" || notification.includes("idle")) return "input";
   if (normalized.includes("sessionend") || normalized === "interrupt") return "stopped";
+  // Cursor reports cancelled and failed turns through the stop hook's status.
+  if (["aborted", "error"].includes(String(payload.status || "").toLowerCase())) return "stopped";
   if (looksLikeQuestion(message)) return "input";
   return "complete";
 }
@@ -198,7 +213,8 @@ function messageFromPayload(payload, args) {
 }
 
 function projectName(payload) {
-  const cwd = first(payload.cwd, process.env.AGENT_CWD, process.cwd());
+  const workspaceRoot = Array.isArray(payload.workspace_roots) ? payload.workspace_roots[0] : "";
+  const cwd = first(payload.cwd, workspaceRoot, process.env.AGENT_CWD, process.cwd());
   return path.basename(cwd) || "task";
 }
 
@@ -254,15 +270,25 @@ function requestPushover(endpoint, fields) {
   });
 }
 
-function credentials() {
-  const token = first(process.env.PUSHOVER_API_TOKEN, process.env.PUSHOVER_TOKEN);
+function hostTokenName(host) {
+  if (host === "Claude Code") return "PUSHOVER_API_TOKEN_CC";
+  return `PUSHOVER_API_TOKEN_${host.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+}
+
+function credentials(host) {
+  // A per-host application token (PUSHOVER_API_TOKEN_CODEX, _CURSOR, _CC, ...) wins over the shared one.
+  const token = first(process.env[hostTokenName(host)], process.env.PUSHOVER_API_TOKEN, process.env.PUSHOVER_TOKEN);
   const user = first(process.env.PUSHOVER_USER_KEY, process.env.PUSHOVER_USER);
-  if (!token || !user) throw new Error("Set PUSHOVER_API_TOKEN (or PUSHOVER_TOKEN) and PUSHOVER_USER_KEY (or PUSHOVER_USER)");
+  if (!token || !user) {
+    throw new Error(`Set PUSHOVER_API_TOKEN (or ${hostTokenName(host)}) and PUSHOVER_USER_KEY (or PUSHOVER_USER)`);
+  }
   return { token, user };
 }
 
 function checkConfiguration(args) {
-  credentials();
+  const payload = { ...args.notify, ...args.payload };
+  const host = detectHost(payload, args);
+  credentials(host);
   try {
     const endpoint = new URL(first(process.env.PUSHOVER_API_URL, DEFAULT_API_URL));
     if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error();
@@ -274,8 +300,7 @@ function checkConfiguration(args) {
     throw new Error("PUSHOVER_PRIORITY must be -2, -1, 0, or 1; emergency priority is not supported.");
   }
   // Check template syntax with sample IDs; real identifiers are validated when the hook runs.
-  const payload = { session_id: "check", thread_id: "check", turn_id: "check", ...args.payload };
-  conversationUrl(payload, args, detectHost(payload, args));
+  conversationUrl({ session_id: "check", thread_id: "check", turn_id: "check", ...payload }, args, host);
 }
 
 async function main() {
@@ -290,9 +315,11 @@ async function main() {
   --message VALUE    Notification text.
   --url VALUE        Absolute conversation URL, up to 512 characters.
   --payload JSON     JSON object overriding stdin fields; metadata for templates and hooks.
+  JSON               A single JSON object argument (Codex \`notify\`) replaces stdin.
 
 Normal mode reads lifecycle JSON or plain text from stdin.
 Credentials: PUSHOVER_API_TOKEN and PUSHOVER_USER_KEY (aliases PUSHOVER_TOKEN and PUSHOVER_USER).
+PUSHOVER_API_TOKEN_<HOST> (for example _CODEX, _CURSOR; _CC for Claude Code) overrides the token per host.
 PUSHOVER_DRY_RUN=1 previews an alert; PUSHOVER_FAIL_HARD=1 makes delivery failures exit 1.
 CLI errors exit 2; failed --check exits 1. See README.md for all settings.
 `);
@@ -307,7 +334,7 @@ CLI errors exit 2; failed --check exits 1. See README.md for all settings.
     process.stdout.write("Local configuration checks passed: credential presence, API endpoint, priority, and link syntax.\nNo network request was made; credential validity, runtime identifiers, and mobile delivery are unverified.\n");
     return;
   }
-  const payload = { ...(await readInput()), ...args.payload };
+  const payload = { ...(args.notify ?? await readInput()), ...args.payload };
   const notice = notification(payload, args);
   if (notice.event.toLowerCase().includes("subagent") && !isTruthy(process.env.PUSHOVER_NOTIFY_SUBAGENTS)) return;
 
@@ -316,7 +343,7 @@ CLI errors exit 2; failed --check exits 1. See README.md for all settings.
     return;
   }
 
-  const { token, user } = credentials();
+  const { token, user } = credentials(notice.host);
 
   const fields = { token, user, title: notice.title, message: notice.message };
   if (notice.url) {

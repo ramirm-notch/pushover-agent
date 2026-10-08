@@ -5,8 +5,9 @@ Pushover Agent is a dependency-free Node CLI: agent lifecycle JSON/flags → not
 ## Code map
 
 - `plugins/pushover-agent/scripts/pushover-notify.mjs`: parsing, classification, conversation links, HTTP delivery, and failure handling.
-- `plugins/pushover-agent/hooks.json`: Codex hooks; `plugins/pushover-agent/hooks/claude-hooks.json`: Claude hooks. Keep adapters thin and host identity explicit.
-- `.agents/plugins/marketplace.json`: Codex catalog. Plugin manifests and the Claude catalog live inside `plugins/pushover-agent/`.
+- `plugins/pushover-agent/hooks.json`: Codex hooks; `hooks/claude-hooks.json`: Claude hooks; `hooks/cursor-hooks.json`: Cursor hooks. Keep adapters thin and host identity explicit.
+- Each host reads its own manifest (`.codex-plugin`, `.claude-plugin`, `.cursor-plugin`), which must declare its hooks file. Codex and Cursor also read other hosts' manifests, and every host auto-loads `hooks/hooks.json`, so never add that file.
+- `.agents/plugins/marketplace.json`: Codex catalog. Plugin manifests and the Claude catalog (also read by Cursor) live inside `plugins/pushover-agent/`.
 - `plugins/pushover-agent/test/notifier.test.mjs`: CLI, declared hooks, package paths, and loopback HTTP regression tests.
 
 ## Boundaries
