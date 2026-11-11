@@ -61,14 +61,14 @@ function cursorStop(overrides = {}) {
   };
 }
 
-async function capture(payload, extraEnv = {}, statusCode = 200, args = []) {
-  let received;
+async function withReceiver(run, statusCode = 200) {
+  const forms = [];
   const server = http.createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
-      received = new URLSearchParams(body);
+      forms.push(new URLSearchParams(body));
       response.writeHead(statusCode, { "content-type": "application/json" });
       response.end(JSON.stringify({ status: statusCode === 200 ? 1 : 0 }));
     });
@@ -79,16 +79,21 @@ async function capture(payload, extraEnv = {}, statusCode = 200, args = []) {
   });
   const { port } = server.address();
   try {
-    const result = await runScript(args, payload === null ? null : JSON.stringify(payload), {
+    return await run(forms, {
       PUSHOVER_API_TOKEN: "test-token",
       PUSHOVER_USER_KEY: "test-user",
       PUSHOVER_API_URL: `http://127.0.0.1:${port}/1/messages.json`,
-      ...extraEnv,
     });
-    return { form: received, ...result };
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+}
+
+async function capture(payload, extraEnv = {}, statusCode = 200, args = []) {
+  return withReceiver(async (forms, env) => {
+    const result = await runScript(args, payload === null ? null : JSON.stringify(payload), { ...env, ...extraEnv });
+    return { form: forms.at(-1), ...result };
+  }, statusCode);
 }
 
 test("sends a question notification with a mobile URL", async () => {
@@ -106,16 +111,143 @@ test("sends a question notification with a mobile URL", async () => {
   assert.match(form.get("message"), /Open conversation: https:\/\/agents\.example/);
 });
 
-test("sends a final Codex notification with its thread deep link", async () => {
-  const { form } = await capture({
+test("Codex Stop completion does not notify for an ordinary turn end", async () => {
+  const { stdout } = await runScript([], JSON.stringify({
     hook_event_name: "Stop",
     thread_id: "thread-123",
     cwd: "/work/my-project",
     last_assistant_message: "Implemented and verified the change.",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  assert.equal(stdout, "");
+});
+
+test("Codex ignores tool progress, repeated Stop hooks and stale or optional questions", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pushover-agent-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const transcript = path.join(directory, "transcript.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ role: "assistant", content: "Which deployment should I use?" }));
+  const cases = [
+    { hook_event_name: "PostToolUse", tool_name: "Bash" },
+    { hook_event_name: "Stop", stop_hook_active: true, last_assistant_message: "Which deployment should I use?" },
+    { hook_event_name: "Stop", last_assistant_message: null, transcript_path: transcript },
+    { hook_event_name: "Stop", last_assistant_message: "Atualizei o guia da pergunta ‘Should I retry?’ com um exemplo." },
+    { hook_event_name: "Stop", last_assistant_message: "Tudo concluído. Quer que eu faça também a publicação?" },
+  ];
+  const results = await Promise.all(cases.map((event) => runScript(["--host", "Codex"], JSON.stringify({
+    session_id: "thread-123", turn_id: "turn-123", ...event,
+  }), { PUSHOVER_DRY_RUN: "1" })));
+  assert.deepEqual(results.map(({ stdout, stderr }) => Boolean(stdout || stderr)), [false, false, false, false, false]);
+});
+
+test("Codex Stop alerts when its final message needs action in Portuguese", async () => {
+  const { stdout } = await runScript(["--host", "Codex"], JSON.stringify({
+    hook_event_name: "Stop", session_id: "thread-123", turn_id: "turn-123",
+    last_assistant_message: "Os testes passaram.\n\nPreciso que você confirme a versão para publicar.",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  assert.equal(JSON.parse(stdout).state, "input");
+});
+
+test("Codex SessionEnd sends a final session notification", async () => {
+  const { stdout } = await runScript(["--host", "Codex"], JSON.stringify({
+    hook_event_name: "SessionEnd",
+    session_id: "session-123",
+    cwd: "/work/my-project",
+    reason: "other",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  const notice = JSON.parse(stdout);
+  assert.equal(notice.state, "complete");
+  assert.match(notice.title, /Codex finished/);
+  assert.equal(notice.url, "codex://threads/session-123");
+  assert.match(notice.message, /session ended/i);
+});
+
+test("concurrent Codex plugin copies deliver each approval and session end once", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pushover-agent-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const secondCopy = path.join(directory, "other-marketplace");
+  fs.cpSync(pluginRoot, secondCopy, { recursive: true });
+  const { hooks } = JSON.parse(fs.readFileSync(path.join(pluginRoot, "hooks.json"), "utf8"));
+  const session = { session_id: "thread-123", cwd: "/work/my-project" };
+  const approval = {
+    ...session, hook_event_name: "PermissionRequest", turn_id: "turn-123", tool_name: "Bash",
+    tool_input: { command: "git push", description: "Approve the push." },
+  };
+  const end = { ...session, hook_event_name: "SessionEnd", reason: "other" };
+
+  await withReceiver(async (forms, env) => {
+    const isolatedEnv = { ...env, TMPDIR: directory, TMP: directory, TEMP: directory };
+    const invoke = (event, root = pluginRoot) => runScript([], JSON.stringify(event), {
+      ...isolatedEnv, PLUGIN_ROOT: root,
+    }, hooks[event.hook_event_name][0].hooks[0].command);
+    const sendCopies = (event) => Promise.all([pluginRoot, secondCopy, pluginRoot, secondCopy].map((root) => invoke(event, root)));
+
+    await sendCopies(approval);
+    assert.deepEqual(forms.map((form) => form.get("title")), ["Codex needs input — my-project"]);
+    await invoke({ ...approval, tool_input: { command: "npm test" } });
+    assert.equal(forms.length, 2, "a different approval in the same turn still alerts");
+    await sendCopies(end);
+    await invoke(end, secondCopy);
+    assert.deepEqual(forms.map((form) => form.get("title")), [
+      "Codex needs input — my-project", "Codex needs input — my-project", "Codex finished — my-project",
+    ]);
+    await invoke({ ...end, session_id: "thread-456" });
+    assert.equal(forms.length, 4, "a different thread still gets its own completion alert");
+
+    const question = "Which deployment should I use?";
+    await Promise.all([
+      invoke({ ...session, hook_event_name: "Stop", turn_id: "turn-456", last_assistant_message: question }),
+      runScript([JSON.stringify({ type: "agent-turn-complete", "thread-id": session.session_id,
+        "turn-id": "turn-456", "last-assistant-message": question, cwd: session.cwd })], null, isolatedEnv),
+    ]);
+    assert.equal(forms.length, 5, "a Stop and a legacy notify for the same question produce one alert");
+    assert.match(forms.at(-1).get("title"), /Codex needs input/);
   });
-  assert.match(form.get("title"), /Codex finished/);
-  assert.equal(form.get("url"), "codex://threads/thread-123");
-  assert.match(form.get("message"), /Implemented and verified/);
+});
+
+test("an explicitly rejected Codex notification can be sent by a later invocation", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pushover-agent-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const env = { TMPDIR: directory, TMP: directory, TEMP: directory };
+  const event = { hook_event_name: "SessionEnd", session_id: "thread-123", host: "Codex" };
+  const { stderr } = await capture(event, env, 429);
+  assert.match(stderr, /HTTP 429/);
+  const { form } = await capture(event, env);
+  assert.ok(form, "the rejected request must not suppress a later delivery");
+  assert.equal((await capture(event, env)).form, undefined, "accepted deliveries stay deduplicated");
+});
+
+test("Codex Stop questions send an input notification", async () => {
+  const { stdout } = await runScript([], JSON.stringify({
+    hook_event_name: "Stop",
+    thread_id: "thread-123",
+    cwd: "/work/my-project",
+    last_assistant_message: "Which deployment should I use?",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  const notice = JSON.parse(stdout);
+  assert.match(notice.title, /Codex needs input/);
+  assert.equal(notice.url, "codex://threads/thread-123");
+  assert.match(notice.message, /^Which deployment should I use\?/);
+});
+
+test("generic host completion notifications remain enabled", async () => {
+  const { stdout } = await runScript([], JSON.stringify({
+    event: "completed",
+    host: "my-agent",
+    message: "Implemented and verified the change.",
+    cwd: "/work/my-project",
+  }), { PUSHOVER_DRY_RUN: "1" });
+  const notice = JSON.parse(stdout);
+  assert.equal(notice.title, "my-agent finished — my-project");
+  assert.match(notice.message, /Implemented and verified/);
+});
+
+test("Codex subagent completion alerts remain available when explicitly enabled", async () => {
+  const { stdout } = await runScript([], JSON.stringify({
+    event: "SubagentStop",
+    host: "Codex",
+    message: "Subagent finished its review.",
+  }), { PUSHOVER_DRY_RUN: "1", PUSHOVER_NOTIFY_SUBAGENTS: "1" });
+  assert.equal(JSON.parse(stdout).state, "complete");
 });
 
 test("sends permission requests immediately", async () => {
@@ -190,16 +322,21 @@ test("marketplaces resolve to the packaged plugin", () => {
 
 test("declared host hooks send input alerts with the correct host and conversation", async () => {
   for (const [host, manifestPath, events] of [
-    ["Codex", ".codex-plugin/plugin.json", ["Stop", "PermissionRequest"]],
+    ["Codex", ".codex-plugin/plugin.json", ["SessionEnd", "Stop", "PermissionRequest"]],
     ["Claude Code", ".claude-plugin/plugin.json", ["Stop", "Notification", "PermissionRequest"]],
     ["Cursor", ".cursor-plugin/plugin.json", ["stop"]],
   ]) {
     const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifestPath), "utf8"));
     assert.equal(typeof manifest.hooks, "string", `${manifestPath} must declare its hooks file`);
     const config = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifest.hooks), "utf8"));
+    if (host === "Codex") assert.deepEqual(Object.keys(config.hooks).sort(), ["PermissionRequest", "SessionEnd", "Stop"]);
     for (const event of events) {
       const hooks = (config.hooks[event] || []).flatMap((group) => group.hooks ?? [group]);
       assert.ok(hooks.length, `${host} ${event} must have a hook`);
+      if (host === "Codex") {
+        assert.equal(hooks.length, 1, `${event} must run only one Pushover hook per installation`);
+        assert.ok(hooks.every((hook) => !("statusMessage" in hook)), `${event} must not show a sending message before filtering`);
+      }
       for (const hook of hooks) {
         assert.ok(
           !("async" in hook),
@@ -219,13 +356,17 @@ test("declared host hooks send input alerts with the correct host and conversati
         }, hook.command);
         const notice = JSON.parse(stdout);
         assert.equal(notice.host, host, `${host} ${event} host`);
-        assert.equal(notice.state, "input", `${host} ${event} state`);
+        assert.equal(notice.state, event === "SessionEnd" ? "complete" : "input", `${host} ${event} state`);
         assert.equal(notice.url, host === "Codex" ? "codex://threads/session-123" : "");
         if (host === "Cursor") {
           assert.equal(notice.title, "Cursor needs input — my-project");
           assert.match(notice.message, /^Which deployment should I use\?/);
         }
       }
+    }
+    if (host === "Codex") {
+      const sessionEndHooks = config.hooks.SessionEnd.flatMap((group) => group.hooks ?? [group]);
+      assert.ok(sessionEndHooks.every((hook) => hook.timeout <= 3), "SessionEnd must fit Codex's 3-second limit");
     }
   }
 });
@@ -259,8 +400,8 @@ test("Cursor stop payloads use the transcript, workspace, and turn status withou
   }
 });
 
-test("Codex notify passes its event as one JSON argument without stdin", async () => {
-  const { stdout } = await runScript([JSON.stringify({
+test("Codex notify turn completion events do not pretend the session ended", async () => {
+  const { stdout, stderr } = await runScript([JSON.stringify({
     type: "agent-turn-complete",
     "thread-id": "thread-123",
     "turn-id": "turn-123",
@@ -268,10 +409,21 @@ test("Codex notify passes its event as one JSON argument without stdin", async (
     "input-messages": ["Ship it."],
     "last-assistant-message": "Implemented and verified the change.",
   })], null, { PUSHOVER_DRY_RUN: "1" });
+  assert.equal(stdout, "");
+  assert.equal(stderr, "");
+});
+
+test("Codex notify still alerts when the final message asks the user for input", async () => {
+  const { stdout } = await runScript([JSON.stringify({
+    type: "agent-turn-complete",
+    "thread-id": "thread-123",
+    "turn-id": "turn-123",
+    cwd: "/work/my-project",
+    "last-assistant-message": "Which deployment should I use?",
+  })], null, { PUSHOVER_DRY_RUN: "1" });
   const notice = JSON.parse(stdout);
-  assert.equal(notice.title, "Codex finished — my-project");
-  assert.equal(notice.url, "codex://threads/thread-123");
-  assert.match(notice.message, /^Implemented and verified the change\./);
+  assert.equal(notice.state, "input");
+  assert.match(notice.title, /Codex needs input/);
 });
 
 test("per-host application tokens override the shared token", async () => {
@@ -282,7 +434,7 @@ test("per-host application tokens override the shared token", async () => {
     ["my-agent", { PUSHOVER_API_TOKEN_MY_AGENT: "generic-token" }, "generic-token"],
     ["other-agent", { PUSHOVER_API_TOKEN_CURSOR: "cursor-token" }, "shared-token"],
   ]) {
-    const { form } = await capture({ event: "completed", host }, { PUSHOVER_API_TOKEN: "shared-token", ...env });
+    const { form } = await capture({ event: "input", host }, { PUSHOVER_API_TOKEN: "shared-token", ...env });
     assert.equal(form.get("token"), token, host);
   }
   const { stdout } = await runScript(["--check", "--host", "Cursor"], null, {

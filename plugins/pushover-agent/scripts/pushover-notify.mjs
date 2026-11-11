@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -10,6 +12,9 @@ const MAX_TITLE = 250;
 const MAX_MESSAGE = 1024;
 const MAX_URL = 512;
 const DEFAULT_API_URL = "https://api.pushover.net/1/messages.json";
+const QUESTION_END = /\?\s*[*_`.)\]]*$/u;
+const CODEX_TURN_EVENTS = new Set(["stop", "agent-turn-complete"]);
+const CODEX_ALERT_EVENTS = new Set(["permissionrequest", "sessionend", "complete", "completed", "input", "stopped", "subagentstop"]);
 
 function first(...values) {
   return values.find((value) => typeof value === "string" && value.trim())?.trim() || "";
@@ -131,8 +136,16 @@ function detectEvent(payload, args) {
 function looksLikeQuestion(text) {
   const tail = String(text || "").trim().slice(-800);
   if (!tail) return false;
-  return /\?\s*(?:[*_`.)\]]*)$/u.test(tail)
+  return QUESTION_END.test(tail)
     || /(?:please (?:choose|confirm|provide|tell me)|could you|would you|do you want|should I|which (?:option|one)|what would you|need (?:your|you to)|waiting for your)/iu.test(tail);
+}
+
+function codexTurnRequestsInput(message) {
+  const sentence = message.slice(-800).split(/\n\s*\n|(?<=[.!?])\s+/u).at(-1).replace(/^[\s*_>`-]+/u, "");
+  if (/^(?:if you (?:want|prefer)|would you like me to|do you want me to|want me to|se (?:quiser|preferir)|quer que eu|gostaria que eu|posso (?:também|ajudar))\b/iu.test(sentence)) return false;
+  return QUESTION_END.test(sentence)
+    || /^(?:(?:please,?|(?:can|could|would) you) (?:choose|confirm|provide|tell me|approve|select|send|reply|answer)|i need (?:your|you to)|waiting for your)(?=\s|[.!?,]|$)/iu.test(sentence)
+    || /^(?:preciso (?:da sua|do seu|que você)|aguardo (?:sua|seu)|(?:por favor[,\s]+)?(?:confirme|escolha|informe|envie|responda|autorize))(?=\s|[.!?,]|$)/iu.test(sentence);
 }
 
 function classify(event, payload, message) {
@@ -142,7 +155,8 @@ function classify(event, payload, message) {
   if (normalized === "input" || normalized === "stopped") return normalized;
   if (normalized.includes("permission") || notification.includes("permission")) return "input";
   if (normalized === "notification" || notification.includes("idle")) return "input";
-  if (normalized.includes("sessionend") || normalized === "interrupt") return "stopped";
+  if (normalized.includes("sessionend")) return "complete";
+  if (normalized === "interrupt") return "stopped";
   // Cursor reports cancelled and failed turns through the stop hook's status.
   if (["aborted", "error"].includes(String(payload.status || "").toLowerCase())) return "stopped";
   if (looksLikeQuestion(message)) return "input";
@@ -155,6 +169,43 @@ function identifiers(payload) {
     thread_id: first(payload.thread_id, payload.threadId, payload["thread-id"], process.env.CODEX_THREAD_ID),
     turn_id: first(payload.turn_id, payload.turnId, payload["turn-id"]),
   };
+}
+
+function reserveCodexNotification(payload, notice) {
+  if (notice.host !== "Codex") return;
+  const { session_id, thread_id, turn_id } = identifiers(payload);
+  const thread = session_id || thread_id;
+  if (!thread) return;
+
+  const event = notice.event.toLowerCase();
+  let key;
+  if (event === "sessionend") {
+    key = [thread, event];
+  } else if (turn_id && event === "permissionrequest") {
+    const requestId = first(payload.tool_use_id, payload.request_id);
+    key = [thread, event, turn_id, requestId || [payload.tool_name, payload.tool_input]];
+  } else if (turn_id && CODEX_TURN_EVENTS.has(event)) {
+    key = [thread, "turn-input", turn_id];
+  } else {
+    return;
+  }
+
+  const uid = process.getuid?.();
+  const directory = path.join(os.tmpdir(), `pushover-agent-${uid ?? "local"}`);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const directoryInfo = fs.lstatSync(directory);
+  if (!directoryInfo.isDirectory() || (uid !== undefined && (directoryInfo.uid !== uid || (directoryInfo.mode & 0o077)))) {
+    throw new Error("The Pushover deduplication directory is not private.");
+  }
+  // Share the claim across installed copies before any process starts sending.
+  const marker = path.join(directory, createHash("sha256").update(JSON.stringify(key)).digest("hex"));
+  try {
+    fs.writeFileSync(marker, "", { flag: "wx", mode: 0o600 });
+    return marker;
+  } catch (error) {
+    if (error.code === "EEXIST") return null;
+    throw error;
+  }
 }
 
 function applyTemplate(template, values) {
@@ -221,8 +272,14 @@ function projectName(payload) {
 function notification(payload, args) {
   const host = detectHost(payload, args);
   const event = detectEvent(payload, args);
-  const message = messageFromPayload(payload, args);
-  const state = classify(event, payload, message);
+  const normalizedEvent = event.toLowerCase();
+  const isCodexTurn = host === "Codex" && CODEX_TURN_EVENTS.has(normalizedEvent);
+  if (host === "Codex" && !isCodexTurn && !CODEX_ALERT_EVENTS.has(normalizedEvent)) return null;
+  const message = isCodexTurn
+    ? first(args.message, payload.last_assistant_message, payload["last-assistant-message"])
+    : messageFromPayload(payload, args);
+  if (isCodexTurn && (payload.stop_hook_active === true || !codexTurnRequestsInput(message))) return null;
+  const state = isCodexTurn ? "input" : classify(event, payload, message);
   const project = projectName(payload);
   const prefix = first(process.env.PUSHOVER_TITLE_PREFIX);
   const label = state === "input" ? "needs input" : state === "stopped" ? "stopped" : "finished";
@@ -233,7 +290,10 @@ function notification(payload, args) {
   } catch (error) {
     process.stderr.write(`[pushover-agent] Conversation link omitted: ${error.message}\n`);
   }
-  const fallback = state === "input" ? "The agent is waiting for you." : state === "stopped" ? "The agent stopped." : "The agent completed its turn.";
+  const fallback = state === "input" ? "The agent is waiting for you."
+    : state === "stopped" ? "The agent stopped."
+      : event.toLowerCase().includes("sessionend") ? "The agent session ended."
+        : "The agent completed its turn.";
   const suffix = url ? `\n\nOpen conversation: ${url}` : "";
   const body = truncate(message || fallback, MAX_MESSAGE - suffix.length) + suffix;
   return { title, message: body, url, state, host, event };
@@ -243,7 +303,7 @@ function isTruthy(value) {
   return /^(1|true|yes|on)$/i.test(String(value || ""));
 }
 
-function requestPushover(endpoint, fields) {
+function requestPushover(endpoint, fields, timeout = 10_000) {
   return new Promise((resolve, reject) => {
     const target = new URL(endpoint);
     const body = new URLSearchParams(fields).toString();
@@ -254,14 +314,16 @@ function requestPushover(endpoint, fields) {
         "content-type": "application/x-www-form-urlencoded",
         "content-length": Buffer.byteLength(body),
       },
-      timeout: 10_000,
+      timeout,
     }, (response) => {
       let responseBody = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => { responseBody += chunk; });
+      response.on("error", reject);
       response.on("end", () => {
-        if ((response.statusCode || 500) >= 200 && (response.statusCode || 500) < 300) resolve(responseBody);
-        else reject(new Error(`Pushover returned HTTP ${response.statusCode || "unknown"}`));
+        const { statusCode } = response;
+        if (statusCode >= 200 && statusCode < 300) resolve(responseBody);
+        else reject(Object.assign(new Error(`Pushover returned HTTP ${statusCode || "unknown"}`), { statusCode }));
       });
     });
     request.on("timeout", () => request.destroy(new Error("Pushover request timed out")));
@@ -336,7 +398,9 @@ CLI errors exit 2; failed --check exits 1. See README.md for all settings.
   }
   const payload = { ...(args.notify ?? await readInput()), ...args.payload };
   const notice = notification(payload, args);
-  if (notice.event.toLowerCase().includes("subagent") && !isTruthy(process.env.PUSHOVER_NOTIFY_SUBAGENTS)) return;
+  if (!notice) return;
+  const isSubagent = notice.event.toLowerCase().includes("subagent");
+  if (isSubagent && !isTruthy(process.env.PUSHOVER_NOTIFY_SUBAGENTS)) return;
 
   if (isTruthy(process.env.PUSHOVER_DRY_RUN)) {
     process.stdout.write(`${JSON.stringify(notice)}\n`);
@@ -344,6 +408,8 @@ CLI errors exit 2; failed --check exits 1. See README.md for all settings.
   }
 
   const { token, user } = credentials(notice.host);
+  const marker = reserveCodexNotification(payload, notice);
+  if (marker === null) return;
 
   const fields = { token, user, title: notice.title, message: notice.message };
   if (notice.url) {
@@ -353,7 +419,14 @@ CLI errors exit 2; failed --check exits 1. See README.md for all settings.
   for (const [field, envName] of [["device", "PUSHOVER_DEVICE"], ["sound", "PUSHOVER_SOUND"], ["priority", "PUSHOVER_PRIORITY"]]) {
     if (first(process.env[envName])) fields[field] = first(process.env[envName]);
   }
-  await requestPushover(first(process.env.PUSHOVER_API_URL, DEFAULT_API_URL), fields);
+  const timeout = notice.event.toLowerCase().includes("sessionend") ? 2_000 : 10_000;
+  try {
+    await requestPushover(first(process.env.PUSHOVER_API_URL, DEFAULT_API_URL), fields, timeout);
+  } catch (error) {
+    // A lost response can mean Pushover already received the request.
+    if (marker && error.statusCode >= 400 && error.statusCode < 500) fs.rmSync(marker, { force: true });
+    throw error;
+  }
 }
 
 main().catch((error) => {

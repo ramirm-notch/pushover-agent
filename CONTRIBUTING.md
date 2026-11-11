@@ -32,7 +32,7 @@ Expect JSON with `state: "input"`, `host: "my-agent"`, a “needs input” title
 
 1. **Interface:** generic JSON stdin/CLI flags, or the relevant Codex/Claude hook declaration. Exercise the entry point being changed; do not stop at an internal helper.
 2. **Core:** `main()` → `notification()` → message/event/host classification and URL selection in `scripts/pushover-notify.mjs`. All adapters share this path.
-3. **Files:** if `transcript_path` is involved, exercise a temporary transcript. The plugin reads it but persists nothing. There is no database or background worker to migrate or restart.
+3. **Files:** if `transcript_path` is involved, exercise a temporary transcript. Transcripts are read-only. For Codex deduplication, exercise repeated hook processes with the same isolated temporary directory. The markers are empty files. There is no database or background worker.
 4. **Service:** `requestPushover()` form-POSTs to Pushover; automated tests substitute a local HTTP endpoint with fake credentials and exercise acceptance and rejection.
 5. **User:** actual host dispatch, Pushover delivery on a phone, and opening the intended conversation require a separately authorized live smoke test. Local HTTP success does not prove those outcomes.
 

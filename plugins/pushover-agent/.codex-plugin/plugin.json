@@ -1,7 +1,7 @@
 {
   "name": "pushover-agent",
-  "version": "0.2.0",
-  "description": "Send Pushover notifications when an agent finishes or needs input.",
+  "version": "0.2.4",
+  "description": "Send Pushover notifications when a Codex session ends or needs user input.",
   "author": {
     "name": "PluginPushover contributors"
   },
@@ -10,8 +10,8 @@
   "hooks": "./hooks.json",
   "interface": {
     "displayName": "Pushover Agent",
-    "shortDescription": "Mobile alerts when an agent stops or needs input.",
-    "longDescription": "Sends a concise Pushover alert after a completed agent turn and when an approval or other user input is required. Notifications include a tappable conversation link when the host or environment provides one.",
+    "shortDescription": "Mobile alerts when a Codex session ends or needs input.",
+    "longDescription": "Sends a Pushover alert when a Codex session ends, requests approval, or needs an answer. Repeated calls for the same event send one alert. Notifications include a conversation link when available.",
     "developerName": "PluginPushover contributors",
     "category": "Productivity",
     "capabilities": ["Lifecycle hooks", "Notifications"],

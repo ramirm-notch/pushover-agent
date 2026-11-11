@@ -1,7 +1,7 @@
 {
   "name": "pushover-agent",
   "displayName": "Pushover Agent",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "description": "Send Pushover notifications when an agent finishes or needs input.",
   "author": {
     "name": "PluginPushover contributors"

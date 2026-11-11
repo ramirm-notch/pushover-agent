@@ -1,6 +1,8 @@
 # Pushover Agent
 
-Pushover Agent sends a mobile notification whenever an agent completes a turn or pauses for user input. It supports Codex, Claude Code, and Cursor directly and exposes a host-neutral command that any agent with lifecycle hooks can call.
+Pushover Agent sends mobile notifications when Codex ends a session or waits for user action. It supports Codex, Claude Code, and Cursor directly and exposes a host-neutral command that any agent with lifecycle hooks can call.
+
+Codex alerts once per thread when its session ends (`SessionEnd`), and once for each distinct approval request (`PermissionRequest`) or turn that ends asking you for input (`Stop`). Tool progress, optional offers in a final answer, and ordinary turn endings stay silent. A session ends when Codex closes or the conversation is archived or deleted. An idle session can also end after 30 minutes with no client viewing it. Claude Code, Cursor, and generic hosts keep their existing notification behavior.
 
 The notification contains the agent's last message, the project name, and a conversation URL when available. The same URL is also set as Pushover's **Open conversation** action.
 
@@ -69,9 +71,13 @@ codex plugin marketplace add .
 codex plugin add pushover-agent@personal
 ```
 
-Open `/hooks`, review and trust the `Stop` and `PermissionRequest` hooks, then start a new task. Restart the Codex desktop app after installation.
+Restart the Codex desktop app after installation. In the Codex CLI, open `/hooks` to review and trust the `SessionEnd`, `Stop`, and `PermissionRequest` hooks, then start a new task. Codex can ask you to review a hook again when its definition changes.
 
-Versions before 0.2.0 did not declare their hooks to Codex, so Codex never ran them. To upgrade, run `codex plugin add pushover-agent@personal` again, then trust the hooks in `/hooks`.
+Versions before 0.2.0 did not declare their hooks to Codex, so Codex never ran them. To upgrade, run `codex plugin add pushover-agent@personal` again, then restart Codex and start a new task.
+
+Install the plugin from one Codex marketplace. Keep `pushover-agent@personal` and remove the duplicate Codex plugin and marketplace with `codex plugin remove pushover-agent@pushover-agent` and `codex plugin marketplace remove pushover-agent`. This does not remove the Claude Code installation.
+
+Copies of 0.2.4 and newer running under the same local user and temporary directory share empty deduplication markers. Codex supplies the thread and turn identifiers. A completion marker is kept for the thread until the system clears the temporary files. An explicit HTTP client error allows a later invocation to send the event again. After a timeout or lost connection the marker stays because Pushover may have received the request.
 
 ## Install in Claude Code
 
@@ -121,7 +127,7 @@ node plugins/pushover-agent/scripts/pushover-notify.mjs \
   --url "https://example.com/conversation/123"
 ```
 
-Codex's `notify` setting is an alternative to the plugin hooks (use only one). It passes the event as a single JSON argument, which the notifier accepts:
+Codex's legacy `notify` setting passes a turn-complete event as one JSON argument. This route alerts only when the current final message asks for input. Use the plugin hooks for approval requests and session completion.
 
 ```toml
 notify = ["node", "/absolute/path/to/PluginPushover/plugins/pushover-agent/scripts/pushover-notify.mjs"]

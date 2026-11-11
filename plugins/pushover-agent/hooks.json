@@ -6,8 +6,18 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
-            "timeout": 15,
-            "statusMessage": "Sending Pushover notification..."
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
+            "timeout": 3
           }
         ]
       }
@@ -18,8 +28,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/scripts/pushover-notify.mjs\" --host Codex",
-            "timeout": 15,
-            "statusMessage": "Sending Pushover notification..."
+            "timeout": 15
           }
         ]
       }
